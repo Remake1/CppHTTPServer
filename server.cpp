@@ -1,3 +1,4 @@
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <sys/socket.h>
@@ -7,6 +8,8 @@
 
 constexpr int PORT = 3000;
 constexpr int BUFFLEN = 4096;
+
+constexpr const char* DOC_ROOT = "../www";
 
 struct HttpRequest {
     std::string method;
@@ -129,28 +132,82 @@ std::string read_http_request(int client_fd) {
     return request;
 }
 
-void send_http_response(int client_fd, const std::string& body) {
-    std::ostringstream response;
-    response << "HTTP/1.1 200 OK\r\n";
-    response << "Content-Type: text/plain\r\n";
-    response << "Content-Length: " << body.size() << "\r\n";
-    response << "Connection: close\r\n";
-    response << "\r\n";
-    response << body;
-
-    std::string resp = response.str();
+void send_all(int client_fd, const std::string& response) {
     size_t sent_total = 0;
 
-    while (sent_total < resp.size()) {
+    while (sent_total < response.size()) {
         ssize_t sent = send(
             client_fd,
-            resp.data() + sent_total,
-            resp.size() - sent_total,
+            response.data() + sent_total,
+            response.size() - sent_total,
             0
         );
         if (sent <= 0) break;
         sent_total += sent;
     }
+}
+
+// ------------------
+// Serve Static files
+// ------------------
+
+std::string map_path(const std::string& url_path) {
+    if (url_path.find("..") != std::string::npos)
+        return "";
+
+    std::string clean = url_path;
+    auto q = clean.find('?');
+    if (q != std::string::npos)
+        clean = clean.substr(0, q);
+
+    if (clean == "/")
+        return std::string(DOC_ROOT) + "/index.html";
+
+    return std::string(DOC_ROOT) + clean;
+}
+
+bool read_file(const std::string& path, std::string& out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+        return false;
+
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    out = ss.str();
+
+    return true;
+}
+
+std::string get_content_type(const std::string& path) {
+    if (path.ends_with(".html")) return "text/html";
+    if (path.ends_with(".css"))  return "text/css";
+    if (path.ends_with(".js"))   return "application/javascript";
+    if (path.ends_with(".png"))  return "image/png";
+    if (path.ends_with(".jpg") || path.ends_with(".jpeg"))
+        return "image/jpeg";
+
+    return "application/octet-stream";
+}
+
+std::string build_response(
+    int status,
+    const std::string& content_type,
+    const std::string& body
+) {
+    std::ostringstream resp;
+
+    if (status == 200)
+        resp << "HTTP/1.1 200 OK\r\n";
+    else
+        resp << "HTTP/1.1 404 Not Found\r\n";
+
+    resp << "Content-Type: " << content_type << "\r\n";
+    resp << "Content-Length: " << body.size() << "\r\n";
+    resp << "Connection: close\r\n";
+    resp << "\r\n";
+    resp << body;
+
+    return resp.str();
 }
 
 
@@ -161,27 +218,38 @@ int main() {
 
     std::cout << "Waiting for new connection...\n";
 
-    std::string client_ip;
-    int client_port;
-    int client_fd = accept_client(server_fd, client_ip, client_port);
+    while (true) {
+        std::string client_ip;
+        int client_port;
+        int client_fd = accept_client(server_fd, client_ip, client_port);
 
-    std::cout << "New client at " << client_ip << ":" << client_port << std::endl;
+        std::cout << "New client at " << client_ip << ":" << client_port << std::endl;
 
-    const std::string raw = read_http_request(client_fd);
+        const std::string raw = read_http_request(client_fd);
 
-    // Parse request line
-    HttpRequest req = parse_http_request(raw);
+        // Parse request line
+        HttpRequest req = parse_http_request(raw);
 
-    std::cout << "Received: " << req.method << " " << req.path << std::endl;
-    for (const auto& [k, v] : req.headers) {
-        std::cout << k << ": " << v << "\n";
+        std::string fs_path = map_path(req.path);
+        std::string body;
+
+        std::string response;
+
+        if (!fs_path.empty() && read_file(fs_path, body)) {
+            std::string type = get_content_type(fs_path);
+            response = build_response(200, type, body);
+        } else {
+            body = "404 Not Found\n";
+            response = build_response(404, "text/plain", body);
+        }
+
+        send_all(client_fd, response);
+
+        // Close
+        shutdown(client_fd, SHUT_WR);
+        close(client_fd);
     }
 
-    send_http_response(client_fd, "Hello world\n");
-
-    // Close
-    shutdown(client_fd, SHUT_WR);
-    close(client_fd);
     close(server_fd);
 
 
