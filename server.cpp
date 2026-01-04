@@ -8,6 +8,13 @@
 constexpr int PORT = 3000;
 constexpr int BUFFLEN = 4096;
 
+struct HttpRequest {
+    std::string method;
+    std::string path;
+    std::string version;
+    std::unordered_map<std::string, std::string> headers;
+};
+
 int create_server_socket(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -37,6 +44,60 @@ int create_server_socket(int port) {
     }
 
     return fd;
+}
+
+// HTTP Request parser
+static std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    size_t end   = s.find_last_not_of(" \t\r\n");
+
+    if (start == std::string::npos)
+        return "";
+
+    return s.substr(start, end - start + 1);
+}
+
+static std::string to_lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return s;
+}
+
+HttpRequest parse_http_request(const std::string& raw) {
+    HttpRequest req;
+    std::istringstream stream(raw);
+    std::string line;
+
+    // Parse request line
+    if (!std::getline(stream, line))
+        return req;
+
+    // remove trailing '\r'
+    if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+
+    std::istringstream request_line(line);
+    request_line >> req.method >> req.path >> req.version;
+
+    // Parse headers
+    while (std::getline(stream, line)) {
+        if (line == "\r" || line.empty())
+            break; // end of headers
+
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+
+        auto colon = line.find(':');
+        if (colon == std::string::npos)
+            continue; // malformed header, ignore
+
+        std::string key   = to_lower(trim(line.substr(0, colon)));
+        std::string value = trim(line.substr(colon + 1));
+
+        req.headers[key] = value;
+    }
+
+    return req;
 }
 
 int accept_client(int server_fd, std::string& ip, int& port) {
@@ -106,14 +167,15 @@ int main() {
 
     std::cout << "New client at " << client_ip << ":" << client_port << std::endl;
 
-    std::string request = read_http_request(client_fd);
+    const std::string raw = read_http_request(client_fd);
 
     // Parse request line
-    std::istringstream stream(request);
-    std::string method, path, version;
-    stream >> method >> path >> version;
+    HttpRequest req = parse_http_request(raw);
 
-    std::cout << "Received: " << method << " " << path << std::endl;
+    std::cout << "Received: " << req.method << " " << req.path << std::endl;
+    for (const auto& [k, v] : req.headers) {
+        std::cout << k << ": " << v << "\n";
+    }
 
     send_http_response(client_fd, "Hello world\n");
 
