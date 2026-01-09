@@ -5,12 +5,16 @@
 #include <iostream>
 #include <utility>
 
+#include "concurrency/ThreadPool.hpp"
+
 HttpServer::HttpServer(ServerConfig config)
     : config_(std::move(config))
     , handler_(config_.doc_root) {}
 
 void HttpServer::start() {
     net::TcpListener listener(config_.port);
+
+    ThreadPool thread_pool(config_.thread_pool_size);
 
     std::cout << "HTTP Server listening on port " << config_.port << std::endl;
     std::cout << "Document root: " << config_.doc_root << std::endl;
@@ -23,7 +27,12 @@ void HttpServer::start() {
             net::TcpSocket client = listener.accept(client_ip, client_port);
             std::cout << "New connection from " << client_ip << ":" << client_port << std::endl;
 
-            handleConnection(std::move(client));
+            auto client_ptr = std::make_shared<net::TcpSocket>(std::move(client));
+
+            thread_pool.submit([this, client_ptr]() mutable {
+                handleConnection(std::move(*client_ptr));
+            });
+
         } catch (const std::exception& e) {
             std::cerr << "Accept error: " << e.what() << std::endl;
         }

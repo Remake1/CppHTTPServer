@@ -8,6 +8,7 @@
 struct ServerConfig {
     int port = 3000;
     std::string doc_root = "../www";
+    size_t thread_pool_size = 4;
 };
 
 class HttpServer {

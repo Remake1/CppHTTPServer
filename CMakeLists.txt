@@ -12,5 +12,6 @@ add_executable(CppHTTPServer
     src/http/HttpResponse.cpp
     src/handlers/StaticFileHandler.cpp
     src/HttpServer.cpp
+        src/concurrency/ThreadPool.cpp
 )
 target_include_directories(CppHTTPServer PRIVATE ${CMAKE_SOURCE_DIR})
