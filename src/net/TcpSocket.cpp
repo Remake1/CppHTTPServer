@@ -27,7 +27,7 @@ int TcpSocket::fd() const { return fd_; }
 
 bool TcpSocket::valid() const { return fd_ >= 0; }
 
-std::string TcpSocket::recv(size_t max_len) {
+std::string TcpSocket::recv(size_t max_len) const {
     std::string buffer(max_len, '\0');
     ssize_t n = ::recv(fd_, buffer.data(), max_len, 0);
     if (n <= 0) return "";
@@ -35,7 +35,7 @@ std::string TcpSocket::recv(size_t max_len) {
     return buffer;
 }
 
-std::string TcpSocket::readHttpRequest() {
+std::string TcpSocket::readHttpRequest() const {
     std::string request;
     while (request.find("\r\n\r\n") == std::string::npos) {
         std::string chunk = recv();
@@ -45,7 +45,7 @@ std::string TcpSocket::readHttpRequest() {
     return request;
 }
 
-bool TcpSocket::sendAll(const std::string& data) {
+bool TcpSocket::sendAll(const std::string& data) const {
     size_t sent_total = 0;
     while (sent_total < data.size()) {
         ssize_t sent = ::send(fd_, data.data() + sent_total,

@@ -43,25 +43,61 @@ void HttpServer::stop() {
     running_ = false;
 }
 
-void HttpServer::handleConnection(net::TcpSocket client) {
-    // Read request
-    std::string raw = client.readHttpRequest();
-    if (raw.empty()) {
-        return;
+static bool isKeepAliveRequested(const http::HttpRequest& req) {
+    // RFC 7230-ish behavior:
+    // - HTTP/1.1 defaults to keep-alive unless Connection: close
+    // - HTTP/1.0 defaults to close unless Connection: keep-alive
+    auto it = req.headers.find("connection");
+    const bool is_http_1_0 = (req.version == "HTTP/1.0");
+
+    if (it == req.headers.end()) {
+        return !is_http_1_0;
     }
 
-    // Parse request
-    http::HttpRequest req = http::parseHttpRequest(raw);
+    const std::string& v = it->second;
+    if (v.find("close") != std::string::npos) return false;
+    if (v.find("keep-alive") != std::string::npos) return true;
 
-    std::cout << "  " << req.method << " " << req.path << std::endl;
+    return !is_http_1_0;
+}
 
-    // Handle request
-    http::HttpResponse resp = handler_.handle(req);
+void HttpServer::handleConnection(net::TcpSocket client) {
+    // Persistent connection loop: handle multiple requests per TCP connection.
+    while (client.valid()) {
+        std::string raw = client.readHttpRequest();
+        if (raw.empty()) {
+            // Client closed or read timeout/error.
+            break;
+        }
 
-    // Send response
-    client.sendAll(resp.toString());
+        // Parse request
+        http::HttpRequest req = http::parseHttpRequest(raw);
+        if (req.method.empty() || req.path.empty()) {
+            http::HttpResponse bad;
+            bad.setStatus(400)
+               .setContentType("text/plain")
+               .setHeader("Connection", "close")
+               .setBody("400 Bad Request\n");
+            (void)client.sendAll(bad.toString());
+            break;
+        }
 
-    // Graceful shutdown
+        std::cout << "  " << req.method << " " << req.path << std::endl;
+
+        const bool keep_alive = isKeepAliveRequested(req);
+
+        // Handle request
+        http::HttpResponse resp = handler_.handle(req);
+        resp.setHeader("Connection", keep_alive ? "keep-alive" : "close");
+
+        if (!client.sendAll(resp.toString())) {
+            break;
+        }
+
+        if (!keep_alive) {
+            break;
+        }
+    }
+
     client.shutdown();
-    // Socket closes automatically via RAII
 }

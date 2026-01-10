@@ -22,9 +22,9 @@ public:
     [[nodiscard]] int fd() const;
     [[nodiscard]] bool valid() const;
 
-    std::string recv(size_t max_len = 4096);
-    std::string readHttpRequest();
-    bool sendAll(const std::string& data);
+    std::string recv(size_t max_len = 4096) const;
+    std::string readHttpRequest() const;
+    bool sendAll(const std::string& data) const;
     void shutdown() const;
     void close();
 
