@@ -3,7 +3,7 @@
 int main() {
     ServerConfig config;
     config.port = 3000;
-    config.doc_root = "../www";
+    config.doc_root = "./www";
 
     HttpServer server(config);
     server.start();
