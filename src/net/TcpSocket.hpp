@@ -28,6 +28,9 @@ public:
     void shutdown() const;
     void close();
 
+    bool setNonBlocking() const;
+
+
 private:
     int fd_ = -1;
 };

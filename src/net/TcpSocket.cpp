@@ -1,6 +1,7 @@
 #include "TcpSocket.hpp"
 #include <sys/socket.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 namespace net {
 
@@ -69,4 +70,9 @@ void TcpSocket::close() {
     }
 }
 
+bool TcpSocket::setNonBlocking() const {
+    int flags = fcntl(fd_, F_GETFL, 0);
+    if (flags < 0) return false;
+    return fcntl(fd_, F_SETFL, flags | O_NONBLOCK) >= 0;
+}
 } // namespace net

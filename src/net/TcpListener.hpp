@@ -21,6 +21,7 @@ public:
     TcpListener& operator=(TcpListener&& other) noexcept;
 
     [[nodiscard]] int port() const;
+    [[nodiscard]] int fd() const { return fd_; }
 
     TcpSocket accept(std::string& client_ip, int& client_port) const;
     TcpSocket accept();

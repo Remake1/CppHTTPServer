@@ -13,5 +13,11 @@ add_executable(CppHTTPServer
     src/handlers/StaticFileHandler.cpp
     src/HttpServer.cpp
         src/concurrency/ThreadPool.cpp
+        src/event/EventLoop.cpp
+        src/event/EventLoop.hpp
+        src/event/Connection.cpp
+        src/event/Connection.hpp
+        src/EventDrivenServer.cpp
+        src/EventDrivenServer.hpp
 )
 target_include_directories(CppHTTPServer PRIVATE ${CMAKE_SOURCE_DIR})
