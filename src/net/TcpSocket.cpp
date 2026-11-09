@@ -5,7 +5,18 @@
 
 namespace net {
 
-TcpSocket::TcpSocket(int fd) : fd_(fd) {}
+TcpSocket::TcpSocket(int fd) : fd_(fd) {
+#ifdef SO_NOSIGPIPE
+    // Writing to a socket the peer has closed raises SIGPIPE, which terminates
+    // the process by default. With SO_NOSIGPIPE, send() fails with EPIPE
+    // instead, which callers already handle as a closed connection.
+    // (On Linux, which lacks this option, pass MSG_NOSIGNAL to send() instead.)
+    if (fd_ >= 0) {
+        int on = 1;
+        ::setsockopt(fd_, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    }
+#endif
+}
 
 TcpSocket::~TcpSocket() {
     close();
