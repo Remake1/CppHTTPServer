@@ -129,6 +129,12 @@ struct KeepAliveCase {
     bool expected;
 };
 
+// Used by GoogleTest in failure messages, and by CMake's gtest_discover_tests
+// for the CTest test names (otherwise they're a raw byte dump of the struct).
+void PrintTo(const KeepAliveCase& c, std::ostream* os) {
+    *os << c.version << " Connection=" << (c.connection ? c.connection : "(none)");
+}
+
 class WantsKeepAlive : public testing::TestWithParam<KeepAliveCase> {};
 
 TEST_P(WantsKeepAlive, FollowsVersionDefaultAndConnectionHeader) {
