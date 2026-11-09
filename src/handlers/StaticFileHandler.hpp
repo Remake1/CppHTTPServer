@@ -3,6 +3,7 @@
 
 #include "../http/HttpRequest.hpp"
 #include "../http/HttpResponse.hpp"
+#include <filesystem>
 #include <string>
 
 namespace handlers {
@@ -18,7 +19,7 @@ private:
     static bool readFile(const std::string& path, std::string& out);
     static std::string getContentType(const std::string& path);
 
-    std::string doc_root_;
+    std::filesystem::path root_;  // Absolute, canonical document root
 };
 
 } // namespace handlers

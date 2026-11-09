@@ -1,12 +1,24 @@
 #include "StaticFileHandler.hpp"
+#include <algorithm>
 #include <fstream>
 #include <sstream>
-#include <utility>
 
 namespace handlers {
 
-StaticFileHandler::StaticFileHandler(std::string doc_root)
-    : doc_root_(std::move(doc_root)) {}
+namespace fs = std::filesystem;
+
+StaticFileHandler::StaticFileHandler(std::string doc_root) {
+    std::error_code ec;
+    root_ = fs::weakly_canonical(fs::absolute(doc_root), ec);
+    if (ec) {
+        root_ = fs::absolute(doc_root).lexically_normal();
+    }
+    // Drop a trailing separator ("/srv/www/" -> "/srv/www") so the
+    // component-wise containment check in mapPath() compares like with like.
+    if (!root_.has_filename()) {
+        root_ = root_.parent_path();
+    }
+}
 
 http::HttpResponse StaticFileHandler::handle(const http::HttpRequest& req) {
     if (req.method != "GET") {
@@ -27,12 +39,9 @@ http::HttpResponse StaticFileHandler::handle(const http::HttpRequest& req) {
     return http::HttpResponse::ok(body, content_type);
 }
 
+// Maps a URL path to a file under the document root.
+// Returns "" if the path is malformed or resolves outside the root.
 std::string StaticFileHandler::mapPath(const std::string& url_path) {
-    // Security: reject paths with ..
-    if (url_path.find("..") != std::string::npos) {
-        return "";
-    }
-
     std::string clean = url_path;
 
     // Strip query string
@@ -41,12 +50,33 @@ std::string StaticFileHandler::mapPath(const std::string& url_path) {
         clean = clean.substr(0, q);
     }
 
-    // Default to index.html for root
-    if (clean == "/") {
-        return doc_root_ + "/index.html";
+    // Only origin-form targets ("/path") are valid here. Without this check,
+    // "GET -secret/x" would be concatenated into "<root>-secret/x".
+    if (clean.empty() || clean.front() != '/') {
+        return "";
     }
 
-    return doc_root_ + clean;
+    // Default to index.html for root
+    if (clean == "/") {
+        clean = "/index.html";
+    }
+
+    // Resolve ".", "..", and symlinks, then verify the result is still inside
+    // root_. Compare whole path components rather than string prefixes:
+    // "/srv/www-secret" starts with the string "/srv/www" but is not inside it.
+    std::error_code ec;
+    fs::path resolved = fs::weakly_canonical(root_ / fs::path(clean).relative_path(), ec);
+    if (ec) {
+        return "";
+    }
+
+    auto [root_it, _] = std::mismatch(root_.begin(), root_.end(),
+                                      resolved.begin(), resolved.end());
+    if (root_it != root_.end()) {
+        return "";  // Escapes the document root
+    }
+
+    return resolved.string();
 }
 
 bool StaticFileHandler::readFile(const std::string& path, std::string& out) {
