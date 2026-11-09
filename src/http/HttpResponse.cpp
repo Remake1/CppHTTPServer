@@ -50,15 +50,15 @@ HttpResponse HttpResponse::ok(const std::string& body, const std::string& conten
     return HttpResponse()
         .setStatus(200)
         .setContentType(content_type)
-        .setHeader("Connection", "close")
         .setBody(body);
 }
 
+// Note: the factories don't set Connection. Only the server knows whether the
+// connection stays open, so it sets that header on every response it sends.
 HttpResponse HttpResponse::notFound(const std::string& body) {
     return HttpResponse()
         .setStatus(404)
         .setContentType("text/plain")
-        .setHeader("Connection", "close")
         .setBody(body);
 }
 
@@ -70,7 +70,11 @@ std::string HttpResponse::defaultReason(int code) {
         case 400: return "Bad Request";
         case 403: return "Forbidden";
         case 404: return "Not Found";
+        case 408: return "Request Timeout";
+        case 413: return "Content Too Large";
+        case 431: return "Request Header Fields Too Large";
         case 500: return "Internal Server Error";
+        case 501: return "Not Implemented";
         default: return "Unknown";
     }
 }

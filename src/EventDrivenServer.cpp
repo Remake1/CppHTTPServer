@@ -1,11 +1,47 @@
 #include "EventDrivenServer.hpp"
 
+#include <cerrno>
+#include <cstring>
+#include <fcntl.h>
 #include <iostream>
-#include <netinet/in.h>
-#include <sys/fcntl.h>
 #include <sys/socket.h>
+#include <vector>
 
-#include "net/TcpListener.hpp"
+#include "http/HttpRequest.hpp"
+
+namespace {
+
+using Clock = event::Connection::Clock;
+
+constexpr http::RequestLimits kLimits{
+    .max_header_bytes = 8 * 1024,
+    .max_body_bytes = 1024 * 1024,
+};
+// Enough for any single valid request; reading stops there until it's handled.
+constexpr size_t kMaxBuffered = kLimits.max_header_bytes + kLimits.max_body_bytes;
+
+constexpr auto kIdleTimeout = std::chrono::seconds(15);     // No traffic at all
+constexpr auto kRequestTimeout = std::chrono::seconds(10);  // Started request not finished
+constexpr auto kTickInterval = std::chrono::seconds(1);
+
+int statusFor(http::ParseStatus status) {
+    switch (status) {
+        case http::ParseStatus::HeadersTooLarge: return 431;
+        case http::ParseStatus::BodyTooLarge:    return 413;
+        case http::ParseStatus::NotImplemented:  return 501;
+        default:                                 return 400;
+    }
+}
+
+http::HttpResponse errorResponse(int status) {
+    http::HttpResponse resp;
+    resp.setStatus(status)
+        .setContentType("text/plain")
+        .setBody("Error " + std::to_string(status) + "\n");
+    return resp;
+}
+
+} // namespace
 
 EventDrivenServer::EventDrivenServer(ServerConfig config)
     : config_(std::move(config))
@@ -14,21 +50,18 @@ EventDrivenServer::EventDrivenServer(ServerConfig config)
 void EventDrivenServer::start() {
     // Create and configure listener socket as class member (keeps it alive)
     listener_.emplace(config_.port);
-    int listen_fd = listener_->fd();
+    listen_fd_ = listener_->fd();
 
     // Make listener non-blocking
-    int flags = fcntl(listen_fd, F_GETFL, 0);
-    fcntl(listen_fd, F_SETFL, flags | O_NONBLOCK);
+    int flags = fcntl(listen_fd_, F_GETFL, 0);
+    fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK);
+
+    loop_.add(listen_fd_, [this](int, event::EventType) { onAccept(); });
+    loop_.setTick(kTickInterval, [this] { onTick(); });
 
     std::cout << "Event-driven HTTP Server listening on port "
               << config_.port << std::endl;
 
-    // Register accept callback
-    loop_.addRead(listen_fd, [this](int fd, event::EventType type) {
-        onAccept(fd, type);
-    });
-
-    // Run the event loop
     loop_.run();
 }
 
@@ -36,93 +69,124 @@ void EventDrivenServer::stop() {
     loop_.stop();
 }
 
-void EventDrivenServer::onAccept(int fd, event::EventType type) {
+void EventDrivenServer::onAccept() {
     while (true) {
-        sockaddr_in addr{};
-        socklen_t len = sizeof(addr);
-        int client_fd = ::accept(fd, reinterpret_cast<sockaddr *>(&addr), &len);
+        int client_fd = ::accept(listen_fd_, nullptr, nullptr);
 
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // No more pending connections
-                break;
+                return;  // No more pending connections
             }
-            std::cerr << "Accept error\n";
+            if (errno == EINTR || errno == ECONNABORTED) {
+                continue;
+            }
+            if (errno == EMFILE || errno == ENFILE) {
+                // Out of file descriptors. The pending connection keeps the
+                // listener readable, so a level-triggered loop would spin at
+                // 100% CPU. Stop watching it until the next tick.
+                std::cerr << "accept: out of file descriptors; pausing accepts\n";
+                loop_.modify(listen_fd_, false, false);
+                accept_paused_ = true;
+                return;
+            }
+            std::cerr << "accept: " << std::strerror(errno) << "\n";
+            return;
+        }
+
+        // Owns client_fd from here, so every early exit closes it.
+        auto conn = std::make_unique<event::Connection>(net::TcpSocket(client_fd));
+        try {
+            loop_.add(client_fd, [this](int fd, event::EventType type) {
+                onConnectionEvent(fd, type);
+            });
+        } catch (const std::exception& e) {
+            std::cerr << "register fd " << client_fd << ": " << e.what() << "\n";
+            continue;
+        }
+        connections_[client_fd] = std::move(conn);
+    }
+}
+
+void EventDrivenServer::onConnectionEvent(int fd, event::EventType type) {
+    auto it = connections_.find(fd);
+    if (it == connections_.end()) return;
+
+    event::Connection& conn = *it->second;
+
+    if (type == event::EventType::Read && conn.state() == event::ConnectionState::Reading) {
+        conn.readAvailable(kMaxBuffered);
+    } else if (type == event::EventType::Write && conn.state() == event::ConnectionState::Writing) {
+        conn.flush();
+    }
+
+    serve(conn);
+}
+
+// Answers buffered requests in order until more input is needed or a response
+// can't be sent in full right now, then watches the events that state needs:
+// Reading -> readable only, Writing -> writable only. Not reading while a
+// response is in flight keeps a later request from being handled out of turn.
+void EventDrivenServer::serve(event::Connection& conn) {
+    while (conn.state() == event::ConnectionState::Reading) {
+        http::ParseResult parsed = http::parseRequestFrame(conn.input(), kLimits);
+
+        if (parsed.status == http::ParseStatus::Incomplete) {
+            if (conn.peerClosed()) {
+                conn.close();  // Client is done sending; nothing left to answer
+            }
             break;
         }
 
-        std::cout << "New connection: fd=" << client_fd << std::endl;
+        if (parsed.status == http::ParseStatus::Complete) {
+            conn.consumeInput(parsed.consumed);
+            const http::HttpRequest& req = parsed.request;
+            std::cout << "  " << req.method << " " << req.path << "\n";
+            respond(conn, handler_.handle(req), http::wantsKeepAlive(req));
+        } else {
+            // Malformed or over a limit: there's no reliable way to find where
+            // the next request starts, so reply and close.
+            respond(conn, errorResponse(statusFor(parsed.status)), false);
+        }
+    }
 
-        // Create connection
-        auto conn = std::make_unique<event::Connection>(
-            net::TcpSocket(client_fd)
-        );
-
-        int cfd = conn->fd();
-        connections_[cfd] = std::move(conn);
-
-        // Register for read events
-        loop_.addRead(cfd, [this](int fd, event::EventType type) {
-            onRead(fd, type);
-        });
+    const int fd = conn.fd();
+    const bool reading = conn.state() == event::ConnectionState::Reading;
+    const bool writing = conn.state() == event::ConnectionState::Writing;
+    if (conn.shouldClose() || !loop_.modify(fd, reading, writing)) {
+        closeConnection(fd);  // Destroys conn
     }
 }
 
-void EventDrivenServer::onRead(int fd, event::EventType type) {
-    auto it = connections_.find(fd);
-    if (it == connections_.end()) return;
+void EventDrivenServer::respond(event::Connection& conn, http::HttpResponse resp, bool keep_alive) {
+    resp.setHeader("Connection", keep_alive ? "keep-alive" : "close");
+    conn.setResponse(resp.toString(), !keep_alive);
+    // Most responses fit in the socket buffer, so try sending now instead of
+    // waiting a loop iteration for EVFILT_WRITE.
+    conn.flush();
+}
 
-    auto& conn = *it->second;
-
-    if (conn.tryRead()) {
-        // Request complete, process it
-        processRequest(conn);
+void EventDrivenServer::onTick() {
+    if (accept_paused_) {
+        accept_paused_ = false;
+        loop_.modify(listen_fd_, true, false);
     }
 
-    if (conn.shouldClose()) {
+    const auto now = Clock::now();
+    std::vector<int> expired;
+    for (const auto& [fd, conn] : connections_) {
+        const bool mid_request = conn->state() == event::ConnectionState::Reading
+                                 && !conn->input().empty();
+        if (mid_request ? now - conn->requestStart() > kRequestTimeout
+                        : now - conn->lastActivity() > kIdleTimeout) {
+            expired.push_back(fd);
+        }
+    }
+    for (int fd : expired) {
         closeConnection(fd);
     }
 }
 
-void EventDrivenServer::onWrite(int fd, event::EventType type) {
-    auto it = connections_.find(fd);
-    if (it == connections_.end()) return;
-
-    auto& conn = *it->second;
-
-    if (conn.tryWrite()) {
-        // Write complete - disable write events, enable read for next request (keep-alive)
-        loop_.disableWrite(fd);
-        // Connection is now back in Reading state, ready for next request
-    }
-
-    if (conn.shouldClose()) {
-        closeConnection(fd);
-    }
-}
-
-void EventDrivenServer::processRequest(event::Connection& conn) {
-    // Parse request
-    http::HttpRequest req = http::parseHttpRequest(conn.requestData());
-
-    if (req.method.empty()) {
-        http::HttpResponse bad;
-        bad.setStatus(400).setBody("400 Bad Request\n");
-        conn.setResponse(bad.toString());
-    } else {
-        std::cout << "  " << req.method << " " << req.path << std::endl;
-        http::HttpResponse resp = handler_.handle(req);
-        conn.setResponse(resp.toString());
-    }
-
-    // Register for write events
-    loop_.addWrite(conn.fd(), [this](int fd, event::EventType type) {
-        onWrite(fd, type);
-    });
-}
 void EventDrivenServer::closeConnection(int fd) {
     loop_.remove(fd);
-    connections_.erase(fd);
+    connections_.erase(fd);  // Connection's socket closes the fd
 }
-
-

@@ -43,24 +43,6 @@ void HttpServer::stop() {
     running_ = false;
 }
 
-static bool isKeepAliveRequested(const http::HttpRequest& req) {
-    // RFC 7230-ish behavior:
-    // - HTTP/1.1 defaults to keep-alive unless Connection: close
-    // - HTTP/1.0 defaults to close unless Connection: keep-alive
-    auto it = req.headers.find("connection");
-    const bool is_http_1_0 = (req.version == "HTTP/1.0");
-
-    if (it == req.headers.end()) {
-        return !is_http_1_0;
-    }
-
-    const std::string& v = it->second;
-    if (v.find("close") != std::string::npos) return false;
-    if (v.find("keep-alive") != std::string::npos) return true;
-
-    return !is_http_1_0;
-}
-
 void HttpServer::handleConnection(net::TcpSocket client) {
     // Persistent connection loop: handle multiple requests per TCP connection.
     while (client.valid()) {
@@ -84,7 +66,7 @@ void HttpServer::handleConnection(net::TcpSocket client) {
 
         std::cout << "  " << req.method << " " << req.path << std::endl;
 
-        const bool keep_alive = isKeepAliveRequested(req);
+        const bool keep_alive = http::wantsKeepAlive(req);
 
         // Handle request
         http::HttpResponse resp = handler_.handle(req);
