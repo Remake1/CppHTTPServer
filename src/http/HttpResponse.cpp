@@ -28,8 +28,11 @@ std::string HttpResponse::toString() const {
 
     resp << "HTTP/1.1 " << status_code_ << " " << status_reason_ << "\r\n";
 
-    // Add Content-Length if body present and not already set
-    if (!body_.empty() && headers_.find("Content-Length") == headers_.end()) {
+    // Always send Content-Length (even 0) unless already set: on a keep-alive
+    // connection it's the only way the client knows where the body ends.
+    // RFC 9110 forbids it on 1xx and 204 responses, which have no body.
+    const bool body_allowed = status_code_ >= 200 && status_code_ != 204;
+    if (body_allowed && headers_.find("Content-Length") == headers_.end()) {
         resp << "Content-Length: " << body_.size() << "\r\n";
     }
 

@@ -80,6 +80,13 @@ std::string StaticFileHandler::mapPath(const std::string& url_path) {
 }
 
 bool StaticFileHandler::readFile(const std::string& path, std::string& out) {
+    // Only serve regular files. On macOS an ifstream can open a directory
+    // and then read 0 bytes, which would be served as an empty 200.
+    std::error_code ec;
+    if (!fs::is_regular_file(path, ec)) {
+        return false;
+    }
+
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
 
