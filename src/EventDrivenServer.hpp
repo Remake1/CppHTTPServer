@@ -26,13 +26,16 @@ private:
     void respond(event::Connection& conn, http::HttpResponse resp, bool keep_alive);
     void onTick();
     void closeConnection(int fd);
+    void pauseAccepting();
+    void resumeAccepting();
 
     ServerConfig config_;
     handlers::StaticFileHandler handler_;
     event::EventLoop loop_;
     std::optional<net::TcpListener> listener_;  // Must persist while loop runs
     int listen_fd_ = -1;
-    bool accept_paused_ = false;  // Set while out of file descriptors
+    size_t max_connections_ = 0;  // Derived from the process's fd limit
+    bool accept_paused_ = false;  // At max_connections_, or out of fds
 
     std::unordered_map<int, std::unique_ptr<event::Connection>> connections_;
 };

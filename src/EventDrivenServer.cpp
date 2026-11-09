@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <vector>
 
@@ -27,6 +28,22 @@ std::chrono::milliseconds tickInterval(const ServerConfig& config) {
     using std::chrono::milliseconds;
     const milliseconds shortest = std::min(config.idle_timeout, config.request_timeout);
     return std::clamp(shortest / 4, milliseconds(10), milliseconds(1000));
+}
+
+// File descriptors kept free for everything that isn't a client socket: the
+// listener, kqueue, stdio, and the file being read for a response.
+constexpr size_t kReservedFds = 16;
+
+// Stop accepting before the process runs out of fds instead of after:
+// on macOS an accept() that fails with EMFILE drops the pending connection,
+// and with no fds left the server can't open files to answer requests.
+size_t maxConnections() {
+    rlimit limit{};
+    if (getrlimit(RLIMIT_NOFILE, &limit) != 0 || limit.rlim_cur == RLIM_INFINITY) {
+        return 10'000;
+    }
+    const auto fds = static_cast<size_t>(limit.rlim_cur);
+    return fds > kReservedFds ? fds - kReservedFds : 1;
 }
 
 int statusFor(http::ParseStatus status) {
@@ -56,6 +73,7 @@ void EventDrivenServer::start() {
     // Create and configure listener socket as class member (keeps it alive)
     listener_.emplace(config_.port);
     listen_fd_ = listener_->fd();
+    max_connections_ = maxConnections();
 
     // Make listener non-blocking
     int flags = fcntl(listen_fd_, F_GETFL, 0);
@@ -76,6 +94,19 @@ void EventDrivenServer::stop() {
 
 void EventDrivenServer::onAccept() {
     while (true) {
+        if (connections_.size() >= max_connections_) {
+            // At capacity: leave further clients waiting in the listen
+            // backlog until a connection closes.
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::cerr << "connection limit (" << max_connections_
+                          << ") reached; further clients wait in the backlog\n";
+            }
+            pauseAccepting();
+            return;
+        }
+
         int client_fd = ::accept(listen_fd_, nullptr, nullptr);
 
         if (client_fd < 0) {
@@ -86,12 +117,12 @@ void EventDrivenServer::onAccept() {
                 continue;
             }
             if (errno == EMFILE || errno == ENFILE) {
-                // Out of file descriptors. The pending connection keeps the
-                // listener readable, so a level-triggered loop would spin at
-                // 100% CPU. Stop watching it until the next tick.
+                // Out of fds despite the connection cap (fds used elsewhere,
+                // or the system-wide limit). Back off until the next tick:
+                // retrying at once would spin at 100% CPU on Linux, where the
+                // connection stays queued and the listener stays readable.
                 std::cerr << "accept: out of file descriptors; pausing accepts\n";
-                loop_.modify(listen_fd_, false, false);
-                accept_paused_ = true;
+                pauseAccepting();
                 return;
             }
             std::cerr << "accept: " << std::strerror(errno) << "\n";
@@ -171,10 +202,7 @@ void EventDrivenServer::respond(event::Connection& conn, http::HttpResponse resp
 }
 
 void EventDrivenServer::onTick() {
-    if (accept_paused_) {
-        accept_paused_ = false;
-        loop_.modify(listen_fd_, true, false);
-    }
+    resumeAccepting();  // Retry after an EMFILE back-off
 
     const auto now = Clock::now();
     std::vector<int> expired;
@@ -194,4 +222,19 @@ void EventDrivenServer::onTick() {
 void EventDrivenServer::closeConnection(int fd) {
     loop_.remove(fd);
     connections_.erase(fd);  // Connection's socket closes the fd
+    resumeAccepting();       // A slot is free
+}
+
+void EventDrivenServer::pauseAccepting() {
+    if (!accept_paused_) {
+        loop_.modify(listen_fd_, false, false);
+        accept_paused_ = true;
+    }
+}
+
+void EventDrivenServer::resumeAccepting() {
+    if (accept_paused_ && connections_.size() < max_connections_) {
+        loop_.modify(listen_fd_, true, false);
+        accept_paused_ = false;
+    }
 }

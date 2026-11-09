@@ -101,6 +101,15 @@ class Server:
         self.log.seek(0)
         return self.log.read().decode(errors="replace")
 
+    def cpu_seconds(self):
+        """Total CPU time the server process has used so far."""
+        out = subprocess.run(["ps", "-o", "time=", "-p", str(self.proc.pid)],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        seconds = 0.0
+        for part in out.split(":"):  # "M:SS.ss" or "H:MM:SS.ss"
+            seconds = seconds * 60 + float(part)
+        return seconds
+
     def stop(self):
         if self.alive():
             self.proc.send_signal(signal.SIGTERM)
@@ -417,6 +426,15 @@ class Pipelining(ServerTestCase):
             s.sendall(get("/big.bin"))
             time.sleep(0.3)  # Response fills the socket buffer and stalls
             s.sendall(get("/style.css", "Connection: close\r\n"))
+
+            # The server is blocked on a full socket with unread input waiting.
+            # It must sleep, not poll: if read events stayed enabled while
+            # writing, the level-triggered loop would spin on that input.
+            cpu_before = self.server.cpu_seconds()
+            time.sleep(0.5)
+            self.assertLess(self.server.cpu_seconds() - cpu_before, 0.25,
+                            "server busy-loops while waiting to write")
+
             data, _ = read_until_close(s, timeout=30)
         rs = parse_responses(data)
         self.assertEqual(len(rs), 2)
@@ -527,41 +545,39 @@ class Timeouts(ServerTestCase):
             self.assertLess(received, BIG_FILE_SIZE)
 
 
-class FdExhaustion(ServerTestCase):
-    """Server limited to 40 fds; 60 clients connect."""
+class ConnectionLimit(ServerTestCase):
+    """Server limited to 40 fds; 60 clients connect at once."""
     event_only = True
     max_fds = 40
     server_args = FAST_TIMEOUTS  # 250 ms tick, so accepting resumes quickly
 
-    def test_does_not_spin_and_recovers(self):
-        socks = []
-        for _ in range(60):
-            try:
-                socks.append(socket.create_connection(("127.0.0.1", self.port), timeout=1))
-            except OSError:
-                pass
+    def test_every_client_is_eventually_served(self):
+        # All 60 connections complete in the kernel's backlog before the
+        # server accepts any, but it can only hold 24 (40 fds - 16 reserved).
+        # The rest must wait in the backlog: on macOS an accept() that fails
+        # with EMFILE drops the connection, and with every fd in use the
+        # server couldn't open the file to answer (it used to send 404).
+        socks = [self.connect() for _ in range(60)]
+        time.sleep(0.5)  # Server fills up to its connection limit
+        for s in socks:
+            s.sendall(get("/style.css", "Connection: close\r\n"))
+
+        statuses = []
+        for s in socks:
+            data, _ = read_until_close(s, timeout=10)
+            statuses.append(parse_responses(data)[0].status if data else "dropped")
+            s.close()
+        self.assertEqual(statuses, [200] * 60)
+        self.assertIn("connection limit (24) reached", self.server.output())
+
+    def test_does_not_busy_loop_while_full(self):
+        socks = [self.connect() for _ in range(60)]
         time.sleep(0.5)
-
-        # A busy loop would burn ~1 s of CPU per second.
-        cpu_before = self._server_cpu_seconds()
+        cpu_before = self.server.cpu_seconds()
         time.sleep(1)
-        cpu_used = self._server_cpu_seconds() - cpu_before
-        self.assertLess(cpu_used, 0.3, "server is busy-looping while out of fds")
-
+        self.assertLess(self.server.cpu_seconds() - cpu_before, 0.3)
         for s in socks:
             s.close()
-        time.sleep(0.5)  # Next tick resumes accepting
-        [r], _ = self.exchange(get("/style.css", "Connection: close\r\n"))
-        self.assertEqual(r.status, 200)
-
-    def _server_cpu_seconds(self):
-        out = subprocess.run(["ps", "-o", "time=", "-p", str(self.server.proc.pid)],
-                             capture_output=True, text=True, check=True).stdout.strip()
-        # Formats: "M:SS.ss" or "H:MM:SS.ss"
-        seconds = 0.0
-        for part in out.split(":"):
-            seconds = seconds * 60 + float(part)
-        return seconds
 
 
 if __name__ == "__main__":

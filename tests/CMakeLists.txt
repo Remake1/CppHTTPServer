@@ -29,7 +29,7 @@ gtest_discover_tests(unit_tests DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 60)
 find_package(Python3 3.8 COMPONENTS Interpreter REQUIRED)
 
 set(COMMON_CLASSES FileServing KeepAlive Robustness)
-set(EVENT_ONLY_CLASSES Pipelining ErrorHandling Timeouts FdExhaustion)
+set(EVENT_ONLY_CLASSES Pipelining ErrorHandling Timeouts ConnectionLimit)
 
 function(add_integration_test mode class)
     add_test(

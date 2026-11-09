@@ -100,6 +100,17 @@ TEST_F(StaticFileHandlerTest, MissingFileIs404) {
     EXPECT_TRUE(hasStatus(get("/nope.html"), 404));
 }
 
+TEST_F(StaticFileHandlerTest, UnreadableFileIs500Not404) {
+    // The file exists, so "Not Found" would be wrong. Same path is taken when
+    // the server is out of file descriptors and can't open it.
+    writeFile(root_ / "private.txt", "secret");
+    fs::permissions(root_ / "private.txt", fs::perms::none);
+    if (std::ifstream(root_ / "private.txt")) {
+        GTEST_SKIP() << "running as root: permissions don't block reads";
+    }
+    EXPECT_TRUE(hasStatus(get("/private.txt"), 500));
+}
+
 TEST_F(StaticFileHandlerTest, DotsInsideFileNamesAreAllowed) {
     EXPECT_EQ(body(get("/a..b.txt")), "dots");
 }

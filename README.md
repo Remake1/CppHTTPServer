@@ -34,13 +34,13 @@ ctest --test-dir build --output-on-failure --parallel 8
 - **Integration tests** ([tests/integration/test_server.py](tests/integration/test_server.py),
   Python standard library only): start the real binary and send raw bytes over TCP: keep-alive,
   pipelining, split request bodies, clients aborting downloads, oversized and malformed requests,
-  timeouts (including a slowloris-style client), and running out of file descriptors. After each
+  timeouts (including a slowloris-style client), and more clients than the fd limit allows. After each
   test class, the server's stderr is checked for sanitizer reports.
 
 Build with sanitizers using `-DSANITIZE=address,undefined` or `-DSANITIZE=thread`. CI runs the
 suite in three configurations: Release, ASan + UBSan, and TSan.
 
 **Known limitations of the threaded server**, which is why the event-only test classes
-(pipelining, error handling, timeouts, fd exhaustion) don't run against it: it drops pipelined
+(pipelining, error handling, timeouts, connection limit) don't run against it: it drops pipelined
 requests and request bodies, and each idle keep-alive connection occupies a worker thread until
 the client disconnects.

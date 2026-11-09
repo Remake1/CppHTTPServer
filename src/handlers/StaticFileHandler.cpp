@@ -30,9 +30,21 @@ http::HttpResponse StaticFileHandler::handle(const http::HttpRequest& req) {
         return http::HttpResponse::notFound();
     }
 
+    // Only serve regular files. On macOS an ifstream can open a directory
+    // and then read 0 bytes, which would be served as an empty 200.
+    std::error_code ec;
+    if (!fs::is_regular_file(fs_path, ec)) {
+        return http::HttpResponse::notFound();
+    }
+
     std::string body;
     if (!readFile(fs_path, body)) {
-        return http::HttpResponse::notFound();
+        // The file exists but couldn't be read: no permission, or the process
+        // is out of file descriptors. A server-side failure, not a 404.
+        return http::HttpResponse()
+            .setStatus(500)
+            .setContentType("text/plain")
+            .setBody("500 Internal Server Error\n");
     }
 
     std::string content_type = getContentType(fs_path);
@@ -80,13 +92,6 @@ std::string StaticFileHandler::mapPath(const std::string& url_path) {
 }
 
 bool StaticFileHandler::readFile(const std::string& path, std::string& out) {
-    // Only serve regular files. On macOS an ifstream can open a directory
-    // and then read 0 bytes, which would be served as an empty 200.
-    std::error_code ec;
-    if (!fs::is_regular_file(path, ec)) {
-        return false;
-    }
-
     std::ifstream file(path, std::ios::binary);
     if (!file) return false;
 
