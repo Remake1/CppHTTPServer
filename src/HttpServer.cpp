@@ -3,9 +3,26 @@
 #include "http/HttpRequest.hpp"
 #include "http/HttpResponse.hpp"
 #include <iostream>
+#include <mutex>
 #include <utility>
 
 #include "concurrency/ThreadPool.hpp"
+
+namespace {
+
+std::mutex log_mutex;
+
+// std::cout is shared by the accept thread and every worker. The standard
+// permits concurrent writes (output may interleave), but libc++ updates the
+// stream's formatting state without synchronisation, which ThreadSanitizer
+// reports as a data race. Serialise whole lines instead.
+template <typename... Args>
+void logLine(const Args&... args) {
+    std::lock_guard lock(log_mutex);
+    (std::cout << ... << args) << std::endl;
+}
+
+} // namespace
 
 HttpServer::HttpServer(ServerConfig config)
     : config_(std::move(config))
@@ -25,7 +42,7 @@ void HttpServer::start() {
             int client_port;
             std::string client_ip;
             net::TcpSocket client = listener.accept(client_ip, client_port);
-            std::cout << "New connection from " << client_ip << ":" << client_port << std::endl;
+            logLine("New connection from ", client_ip, ":", client_port);
 
             auto client_ptr = std::make_shared<net::TcpSocket>(std::move(client));
 
@@ -64,7 +81,7 @@ void HttpServer::handleConnection(net::TcpSocket client) {
             break;
         }
 
-        std::cout << "  " << req.method << " " << req.path << std::endl;
+        logLine("  ", req.method, " ", req.path);
 
         const bool keep_alive = http::wantsKeepAlive(req);
 

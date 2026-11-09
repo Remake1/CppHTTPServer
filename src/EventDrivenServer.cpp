@@ -1,5 +1,6 @@
 #include "EventDrivenServer.hpp"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -20,9 +21,13 @@ constexpr http::RequestLimits kLimits{
 // Enough for any single valid request; reading stops there until it's handled.
 constexpr size_t kMaxBuffered = kLimits.max_header_bytes + kLimits.max_body_bytes;
 
-constexpr auto kIdleTimeout = std::chrono::seconds(15);     // No traffic at all
-constexpr auto kRequestTimeout = std::chrono::seconds(10);  // Started request not finished
-constexpr auto kTickInterval = std::chrono::seconds(1);
+// Timeouts are checked on each tick, so a connection closes up to one tick
+// late. Tick at a quarter of the shortest timeout, between 10 ms and 1 s.
+std::chrono::milliseconds tickInterval(const ServerConfig& config) {
+    using std::chrono::milliseconds;
+    const milliseconds shortest = std::min(config.idle_timeout, config.request_timeout);
+    return std::clamp(shortest / 4, milliseconds(10), milliseconds(1000));
+}
 
 int statusFor(http::ParseStatus status) {
     switch (status) {
@@ -57,7 +62,7 @@ void EventDrivenServer::start() {
     fcntl(listen_fd_, F_SETFL, flags | O_NONBLOCK);
 
     loop_.add(listen_fd_, [this](int, event::EventType) { onAccept(); });
-    loop_.setTick(kTickInterval, [this] { onTick(); });
+    loop_.setTick(tickInterval(config_), [this] { onTick(); });
 
     std::cout << "Event-driven HTTP Server listening on port "
               << config_.port << std::endl;
@@ -176,8 +181,8 @@ void EventDrivenServer::onTick() {
     for (const auto& [fd, conn] : connections_) {
         const bool mid_request = conn->state() == event::ConnectionState::Reading
                                  && !conn->input().empty();
-        if (mid_request ? now - conn->requestStart() > kRequestTimeout
-                        : now - conn->lastActivity() > kIdleTimeout) {
+        if (mid_request ? now - conn->requestStart() > config_.request_timeout
+                        : now - conn->lastActivity() > config_.idle_timeout) {
             expired.push_back(fd);
         }
     }

@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    # The event loop uses kqueue, so this builds on macOS (or BSD) only.
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release
+            build_type: Release
+            sanitize: ""
+          - name: ASan + UBSan
+            build_type: RelWithDebInfo
+            sanitize: address,undefined
+          - name: TSan
+            build_type: RelWithDebInfo
+            sanitize: thread
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DSANITIZE=${{ matrix.sanitize }}
+          -DWARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          # Make any sanitizer report fail the run instead of just printing.
+          ASAN_OPTIONS: halt_on_error=1:abort_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+          TSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build --output-on-failure --parallel 8
